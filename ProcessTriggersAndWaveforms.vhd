@@ -43,15 +43,20 @@ use IEEE.STD_LOGIC_1164.ALL;
 -- any Xilinx primitives in this code.
 --library UNISIM;
 --use UNISIM.VComponents.all;
+constant MAX_NUM_CHANNELS_TO_READOUT : integer :=20;
+type hit_map is array (0 to MAX_NUM_CHANNELS_TO_READOUT - 1) of std_logic_vector(7 downto 0); --first define the type of array.
+type hit_record is
+    record
+        asic_and_ch : hit_map; --hit.asic_ch(hitNo) returns slv("4bit asic" & "4bit ch")
+        win_start   : std_logic_vector(8 downto 0); --hit.win_start returns slv("9bit window")
+        hit_count   : integer;
+    end record
 
 entity ProcessTriggersAndWaveforms is
-    Generic (
-              MAX_NUM_CHANNELS_TO_READOUT : integer := 20
-            );
     Port    ( 
-              clk : in  STD_LOGIC;
-              DataOut : out  STD_LOGIC_VECTOR(16 downto 0);
-              GlobalTriggerIn : in  STD_LOGIC
+              main_clk : in  STD_LOGIC;
+              main_DataOut : out  STD_LOGIC_VECTOR(16 downto 0);
+              main_TriggerIn : in hit_record
             );
 end ProcessTriggersAndWaveforms;
 
@@ -59,30 +64,27 @@ end ProcessTriggersAndWaveforms;
 architecture Behavioral of ProcessTriggersAndWaveforms is
 
     --INTERNAL EVENT MASK SIGNALS
-    signal ASICsToReadout   : STD_LOGIC_VECTOR(3 downto 0);
-    signal EventChannelMask : STD_LOGIC_VECTOR(7 downto 0);
-
-
-
-    signal PacketCombinerBusy        : STD_LOGIC_VECTOR(MAX_NUM_CHANNELS_TO_READOUT downto 0);
-    signal EnablePacketCombiner      : STD_LOGIC_VECTOR(MAX_NUM_CHANNELS_TO_READOUT downto 0);
-
+    signal internal_QueuedTrigger             : hit_record;
+    --INTERNAL STATUS SIGNALS
+    signal internal_TXReadoutBusy             : STD_LOGIC;
+    signal internal_PedFifosEmpty             : std_logic_vector(MAX_NUM_CHANNELS_TO_READOUT downto 0);
+    signal internal_waveFifosEmpty            : std_logic_vector(MAX_NUM_CHANNELS_TO_READOUT downto 0);
+    signal internal_PacketCombinerBusy        : STD_LOGIC_VECTOR(MAX_NUM_CHANNELS_TO_READOUT downto 0);
+    signal internal_EnablePacketCombiner      : STD_LOGIC_VECTOR(MAX_NUM_CHANNELS_TO_READOUT downto 0);
+    signal internal_PedestalData              : std_logic_vector(23 downto 0);
 
     COMPONENT TriggerQueue
         Port ( 
             clk              : in   STD_LOGIC;
-            GlobalTriggerIn  : in   STD_LOGIC_VECTOR(11 downto 0);
-            ASICsToReadout   : out  STD_LOGIC_VECTOR(3 downto 0);
-            EventChannelMask : out  STD_LOGIC_VECTOR(7 downto 0)
-        );
-    END COMPONENT;
-
-
-    COMPONENT PedFetchAddressStream
-        Port ( 
-            clk                        : in   STD_LOGIC;
-            TriggeredChannelList_In    : in   STD_LOGIC_VECTOR (7 downto 0);
-            SRAM_AddressStream_Out     : out  STD_LOGIC_VECTOR (21 downto 0)
+            -- Trigger Inputs
+            TriggerIn          : in  hit_record;
+            -- Process status flags
+            TXReadoutBusy    : in  STD_LOGIC;
+            PedFifosEmpty    : in  std_logic_vector(MAX_NUM_CHANNELS_TO_READOUT downto 0);
+            waveFifosEmpty   : in  std_logic_vector(MAX_NUM_CHANNELS_TO_READOUT downto 0);
+            -- Queued trigger outputs
+            QueuedTriggerOut : out  hit_record;
+            QueuedASICs      : out  STD_LOGIC_VECTOR(3 downto 0)
         );
     END COMPONENT;
 
@@ -98,13 +100,14 @@ architecture Behavioral of ProcessTriggersAndWaveforms is
     END COMPONENT;
 
 
-    COMPONENT FetchPedestals
+    COMPONENT EventPedestalFetcher
         Port ( 
-            clk                     : in  STD_LOGIC;
-            SRAM_AddressStream_In   : in  STD_LOGIC_VECTOR (21 downto 0);
-            SRAM_AddressStream_Out  : out  STD_LOGIC_VECTOR (21 downto 0);
-            busy                    : out  STD_LOGIC;
-            done                    : out  STD_LOGIC
+            clk              : in   STD_LOGIC;
+            enable           : in   STD_LOGIC;
+            busy             : out  STD_LOGIC;
+            hit_index        : in   integer;
+            TriggerIn        : in   hit_record;
+            PedestalDataOut  : out  STD_LOGIC_VECTOR (23 downto 0)
         );
     END COMPONENT;
 
@@ -121,28 +124,17 @@ architecture Behavioral of ProcessTriggersAndWaveforms is
     END COMPONENT;
 
 
-    COMPONENT SubtractPedestals
+    COMPONENT ParallelProcessing
         Port ( 
-            clk                               : in   STD_LOGIC;
-            WaveAndPedFIFOsReady              : in   STD_LOGIC;
-            PacketSize                        : in   STD_LOGIC_VECTOR (9 downto 0);
-            interupt                          : in   STD_LOGIC;
-            busy                              : out  STD_LOGIC;
-            done                              : out  STD_LOGIC;
-            PedestalSubtractedWaveforms_Out   : out  STD_LOGIC_VECTOR (11 downto 0)
-        );
-    END COMPONENT;
-
-
-    COMPONENT ExtractFeatures
-        Port ( 
-            clk                         : in   STD_LOGIC;
-            PedestalSubtractedWaveforms : in   STD_LOGIC_VECTOR (11 downto 0);
-            enable                      : in   STD_LOGIC;
-            busy                        : out  STD_LOGIC;
-            done                        : out  STD_LOGIC;
-            interupt                    : in   STD_LOGIC;
-            reset                       : in   STD_LOGIC
+            clk                     : in  STD_LOGIC;
+            PedFIFO_wr_en           : in STD_LOGIC;
+            PedestalData_In         : in  STD_LOGIC_VECTOR (23 downto 0);
+            PedFIFO_empty           : out STD_LOGIC;
+            WaveFIFO_wr_en          : in STD_LOGIC;
+            WaveformData_In         : in  STD_LOGIC_VECTOR (11 downto 0);    
+            WaveFIFO_empty          : out STD_LOGIC;  
+            busy                    : out  STD_LOGIC;
+            done                    : out  STD_LOGIC
         );
     END COMPONENT;
 
@@ -157,10 +149,13 @@ architecture Behavioral of ProcessTriggersAndWaveforms is
         );
     END COMPONENT;
 
-
-
-
-
+    type Pedestal_Fetching_Management is
+        (
+            idle,
+            fetching_ith_channel
+        );
+    signal next_fetch_state : Pedestal_Fetching_Management := idle;
+    signal count : integer := 0;
 
 
 
@@ -168,18 +163,54 @@ begin
 
     U1 : TriggerQueue
         port map ( 
-            clk              => clk             ,
-            GlobalTriggerIn  => GlobalTriggerIn ,
-            ASICsToReadout   => ASICsToReadout,
-            EventChannelMask   => EventChannelMask
+            clk               => main_clk,
+            TriggerIn         => main_TriggerIn,
+            QueuedTriggerOut  => internal_QueuedTrigger,
+            CycleQueueFlag    => internal_CycleQueueFlag
         );
 
-    U2 : PedFetchAddressStream
+    U2 : EventPedestalFetcher
         port map ( 
-            clk                      =>   clk                     , 
-            TriggeredChannelList_In  =>   TriggeredChannelList_In , 
-            SRAM_AddressStream_Out   =>   SRAM_AddressStream_Out  
+            clk              => clk,            
+            enable           => internal_PedFetchEnable,
+            busy             => internal_PedFetchBusy,
+            hit_index        => int_hit_index,
+            TriggerIn        => internal_QueuedTrigger,
+            PedestalDataOut  => internal_PedestalData
         );
+
+	  process(clk) begin
+		    if (rising_edge(clk)) then
+			      case next_fetch_state is
+          
+                when idle =>
+                    if expression then
+                        count <= "0";
+                        next_fetch_state <= fetching_ith_channel;
+                    else
+                        next_fetch_state <= idle;
+                    end if;
+
+                when fetching_ith_channel =>
+                    if count < internal_QueuedTrigger.hit_count then
+                        internal_PedFetchEnable <= "1";
+                        int_hit_index <= count;
+                        next_fetch_state <= wait_for_ith_channel_fetch;
+                    else
+                        next_fetch_state <= idle;
+                    end if;
+
+                when wait_for_ith_channel_fetch =>
+                    if internal_PedFetchBusy = "1" then
+                        next_fetch_state <= wait_for_ith_channel_fetch;
+                    else 
+                        count <= count +1;
+                        next_fetch_state <= fetching_ith_channel;
+                    end if;
+
+            end case;
+        end if;
+    end process;
 
     U3 : TriggerTX_Readout
         port map (
@@ -192,38 +223,26 @@ begin
 
     U4 : WaveformChannelFilter
         port map (
-            clk                =>    clk               ,
-            EventChannelMask   =>    EventChannelMask  ,
-            WaveformData_In    =>    WaveformData_In   ,
-            WaveformData_Out   =>    WaveformData_Out  ,
-            busy               =>    busy              ,
+            clk                =>    clk,
+            EventChannelMask   =>    EventChannelMask,
+            WaveformData_In    =>    WaveformData_In,
+            WaveformData_Out   =>    WaveformData_Out,
+            busy               =>    busy,
             done               =>    done              
         );
 
     U5 : FetchPedestals
         port map (
-            clk                     =>   clk                     , 
-            SRAM_AddressStream_In   =>   SRAM_AddressStream_In   , 
-            SRAM_AddressStream_Out  =>   SRAM_AddressStream_Out  , 
-            busy                    =>   busy                    , 
+            clk                     =>   clk, 
+            SRAM_AddressStream_In   =>   SRAM_AddressStream_In, 
+            SRAM_AddressStream_Out  =>   SRAM_AddressStream_Out, 
+            busy                    =>   busy, 
             done                    =>   done                    
         );
 
-    U6 : for i in 0 to MAX_NUM_CHANNELS_TO_READOUT generate
-        SubtractPedestals_i : SubtractPedestals
-            port map (
-                clk                              =>   clk,
-                WaveAndPedFIFOsReady             =>   WaveAndPedFIFOsReady(i),
-                PacketSize                       =>   PacketSize(i),
-                interupt                         =>   interupt(i),
-                busy                             =>   busy(i),
-                done                             =>   done(i),
-                PedestalSubtractedWaveforms_Out  =>   PedestalSubtractedWaveforms_Out(i) 
-            );
-        end generate;
 
-    U7 : for i in 0 to MAX_NUM_CHANNELS_TO_READOUT generate
-        ExtractFeatures_i : ExtractFeatures
+    U9 : for i in 0 to MAX_NUM_CHANNELS_TO_READOUT generate
+        ProcessWaveform_i : ParallelProcessing
             port map (
                 clk                          =>   clk,
                 PedestalSubtractedWaveforms  =>   PedestalSubtractedWaveforms(i),
@@ -235,18 +254,22 @@ begin
             );
         end generate;
 
-    U8 : CombinePackets
+
+    U10 : CombinePackets
         port map (
-            clk      =>    clk       , 
-            enable   =>    enable    , 
-            busy     =>    busy      , 
-            done     =>    done      , 
+            clk      =>    clk, 
+            enable   =>    enable, 
+            busy     =>    busy, 
+            done     =>    done, 
             DataOut  =>    DataOut   
         );
 
 
 
 end Behavioral;
+
+
+
 
 
 
