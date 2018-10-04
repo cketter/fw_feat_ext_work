@@ -29,12 +29,28 @@ use IEEE.STD_LOGIC_1164.ALL;
 --library UNISIM;
 --use UNISIM.VComponents.all;
 
+
+type asic_and_channel_hit_map is array (0 to 9) of std_logic_vector(14 downto 0); --first define the type of array.
+type hit_record is
+    record
+        asic_ch : asic_and_channel_hit_map; --hit.asic_ch(asicNo)(chNo) returns hit bit
+        win_start : std_logic_vector(8 downto 0);
+    end record
+
+
+
 entity TriggerQueue is
         Port ( 
             clk              : in   STD_LOGIC;
-            GlobalTriggerIn  : in   STD_LOGIC_VECTOR(11 downto 0);
-            ASICsToReadout   : out  STD_LOGIC_VECTOR(3 downto 0);
-            EventChannelMask : out  STD_LOGIC_VECTOR(7 downto 0);
+            -- Trigger Inputs
+            TriggerIn        : in  hit_record;
+            -- Process status flags
+            ReadoutBusy      : in  STD_LOGIC;
+            PedFifosEmpty    : in  std_logic_vector(MAX_NUM_CHANNELS_TO_READOUT downto 0);
+            waveFifosEmpty   : in  std_logic_vector(MAX_NUM_CHANNELS_TO_READOUT downto 0);
+            -- Queued trigger outputs
+            QueuedTriggerOut : out  hit_record;
+            QueuedASICs      : out  STD_LOGIC_VECTOR(3 downto 0)
         );
 end TriggerQueue;
 
